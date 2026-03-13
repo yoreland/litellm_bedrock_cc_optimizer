@@ -1,0 +1,67 @@
+# LiteLLM Proxy + Bedrock Optimizer Config
+# POC: integrates claudecode-bedrock-proxy optimizations into LiteLLM
+#
+# Features:
+#   - Unified OpenAI-compatible API on :4000
+#   - Prompt caching injection + TTL upgrade (5m → 1h)
+#   - Thinking/effort optimization (adaptive+max for new models)
+#   - Model alias mapping (user-friendly names → Bedrock profile IDs)
+#   - Cost tracking, load balancing, multi-provider support
+#
+# Usage:
+#   source .venv/bin/activate
+#   litellm --config config.yaml --port 4000
+
+model_list:
+  # --- Claude Opus 4.6 ---
+  - model_name: claude-opus-4-6
+    litellm_params:
+      model: bedrock/global.anthropic.claude-opus-4-6-v1
+      aws_region_name: us-east-1
+
+  # --- Claude Sonnet 4.6 (also serves 4.5 requests = auto-upgrade) ---
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: bedrock/global.anthropic.claude-sonnet-4-6
+      aws_region_name: us-east-1
+
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: bedrock/global.anthropic.claude-sonnet-4-6  # auto-upgrade to 4.6
+      aws_region_name: us-east-1
+
+  # --- Claude Haiku 4.5 ---
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0
+      aws_region_name: us-east-1
+
+  # --- Wildcard: pass-through any bedrock/ model ---
+  - model_name: "bedrock/*"
+    litellm_params:
+      model: "bedrock/*"
+      aws_region_name: us-east-1
+
+litellm_settings:
+  # Register our Bedrock Optimizer hook
+  callbacks: bedrock_optimizer.proxy_handler_instance
+
+  # General settings
+  drop_params: True            # drop unsupported params gracefully
+  num_retries: 2               # retry on transient errors
+  request_timeout: 600         # 10 min for long thinking responses
+  set_verbose: False
+
+  # Model group aliases for convenience
+  # model_group_alias:
+  #   claude: claude-sonnet-4-6
+  #   opus: claude-opus-4-6
+
+general_settings:
+  # master_key: sk-litellm-poc  # uncomment to require auth
+  allow_requests_on_db_unavailable: True
+
+# Environment variables (can also be set in shell)
+environment_variables:
+  CACHE_ENABLED: "1"
+  CACHE_TTL: "1h"
