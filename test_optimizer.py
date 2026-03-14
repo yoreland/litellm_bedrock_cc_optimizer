@@ -1,5 +1,5 @@
 """
-Unit tests for bedrock_optimizer.py
+Unit tests for bedrock_optimizer.py (OpenAI format)
 
 Run: python -m pytest test_optimizer.py -v
 """
@@ -9,98 +9,32 @@ import json
 import pytest
 
 from bedrock_optimizer import (
-    modify_thinking,
     inject_cache_control,
-    strip_unsupported_fields,
     _new_cache_marker,
     CACHE_TTL,
 )
 
 
-# ---------------------------------------------------------------------------
-# Thinking Tests
-# ---------------------------------------------------------------------------
-class TestModifyThinking:
-    def test_skip_haiku(self):
-        data = {"messages": [{"role": "user", "content": "hi"}]}
-        modified, action = modify_thinking(data, "bedrock/global.anthropic.claude-haiku-4-5")
-        assert not modified
-        assert "skip" in action.lower()
-
-    def test_adaptive_opus_46(self):
-        data = {
-            "messages": [{"role": "user", "content": "hi"}],
-            "thinking": {"type": "enabled", "budget_tokens": 8000},
-        }
-        modified, action = modify_thinking(data, "bedrock/global.anthropic.claude-opus-4-6-v1")
-        assert modified
-        assert data["thinking"]["type"] == "adaptive"
-        assert data["output_config"]["effort"] == "max"
-        assert "context-1m-2025-08-07" in data.get("anthropic_beta", [])
-
-    def test_adaptive_already_set(self):
-        data = {
-            "messages": [{"role": "user", "content": "hi"}],
-            "thinking": {"type": "adaptive"},
-            "output_config": {"effort": "max"},
-            "anthropic_beta": ["context-1m-2025-08-07"],
-        }
-        modified, action = modify_thinking(data, "bedrock/claude-sonnet-4-6")
-        assert not modified
-        assert "already" in action
-
-    def test_legacy_sonnet_45_inject(self):
-        data = {
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 8192,
-        }
-        modified, action = modify_thinking(data, "bedrock/anthropic.claude-sonnet-4-5")
-        assert modified
-        assert data["thinking"]["type"] == "enabled"
-        assert data["thinking"]["budget_tokens"] == 8191
-
-    def test_legacy_upgrade_budget(self):
-        data = {
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 16000,
-            "thinking": {"type": "enabled", "budget_tokens": 4096},
-        }
-        modified, action = modify_thinking(data, "bedrock/anthropic.claude-sonnet-4-5")
-        assert modified
-        assert data["thinking"]["budget_tokens"] == 15999
-        assert "upgraded" in action
-
-    def test_no_messages_passthrough(self):
-        data = {"model": "test"}
-        modified, action = modify_thinking(data, "bedrock/claude-opus-4-6")
-        assert not modified
-        assert "passthrough" in action
-
-
-# ---------------------------------------------------------------------------
-# Cache Control Tests
-# ---------------------------------------------------------------------------
 class TestInjectCacheControl:
-    def test_inject_tools_and_system(self):
+    """Test cache injection on OpenAI-format messages."""
+
+    def test_inject_system_message(self):
+        """System message should get cache_control on last block."""
         data = {
-            "tools": [
-                {"name": "tool1", "description": "desc1"},
-                {"name": "tool2", "description": "desc2"},
-            ],
-            "system": "You are a helpful assistant.",
             "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": "hello"},
             ],
         }
         added, action = inject_cache_control(data)
-        assert added >= 2
-        # Last tool should have cache_control
-        assert "cache_control" in data["tools"][-1]
-        # System should be converted to list with cache_control
-        assert isinstance(data["system"], list)
-        assert "cache_control" in data["system"][0]
+        assert added >= 1
+        # System content should be converted to array with cache_control
+        sys_msg = data["messages"][0]
+        assert isinstance(sys_msg["content"], list)
+        assert "cache_control" in sys_msg["content"][-1]
 
     def test_inject_assistant_turn(self):
+        """Last assistant message should get cache_control."""
         data = {
             "messages": [
                 {"role": "user", "content": "hello"},
@@ -110,35 +44,75 @@ class TestInjectCacheControl:
         }
         added, action = inject_cache_control(data)
         assert added >= 1
-        # Assistant content should be wrapped in list with cache_control
+        # Assistant content should be wrapped with cache_control
         assistant_msg = data["messages"][1]
         assert isinstance(assistant_msg["content"], list)
-        assert "cache_control" in assistant_msg["content"][0]
+        assert "cache_control" in assistant_msg["content"][-1]
 
-    def test_ttl_upgrade_existing(self):
+    def test_inject_system_and_assistant(self):
+        """Both system and last assistant should get cache_control."""
         data = {
-            "tools": [
-                {"name": "t1", "cache_control": {"type": "ephemeral"}},
-                {"name": "t2", "cache_control": {"type": "ephemeral"}},
-            ],
-            "system": [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}],
             "messages": [
-                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "You are an expert."},
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "user", "content": "question"},
+            ],
+        }
+        added, action = inject_cache_control(data)
+        assert added == 2
+        assert "system" in action
+        assert "last_assistant" in action
+
+    def test_ttl_value(self):
+        """Cache markers should have correct TTL."""
+        data = {
+            "messages": [
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": "hello"},
+            ],
+        }
+        inject_cache_control(data)
+        sys_block = data["messages"][0]["content"][-1]
+        assert sys_block["cache_control"]["ttl"] == CACHE_TTL
+
+    def test_upgrade_existing_ttl(self):
+        """Existing cache_control markers should have TTL upgraded."""
+        data = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "system", "cache_control": {"type": "ephemeral"}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "hello"},
+                    ],
+                },
                 {
                     "role": "assistant",
                     "content": [
-                        {"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "question"},
                     ],
                 },
             ],
         }
         added, action = inject_cache_control(data)
-        assert added == 0  # all 4 slots taken
-        assert "ttl-upgrade" in action or "no-op" in action
-        # Verify TTL was upgraded
-        assert data["tools"][0]["cache_control"]["ttl"] == CACHE_TTL
+        # TTL should be upgraded on existing markers
+        sys_cc = data["messages"][0]["content"][0]["cache_control"]
+        assert sys_cc.get("ttl") == CACHE_TTL
 
     def test_skip_thinking_blocks(self):
+        """Thinking blocks in assistant messages should be skipped."""
         data = {
             "messages": [
                 {"role": "user", "content": "hi"},
@@ -149,11 +123,11 @@ class TestInjectCacheControl:
                         {"type": "text", "text": "hello!"},
                     ],
                 },
+                {"role": "user", "content": "question"},
             ],
         }
         added, action = inject_cache_control(data)
         assert added >= 1
-        # Should add cache_control to text block, not thinking
         assistant_content = data["messages"][1]["content"]
         for block in assistant_content:
             if block["type"] == "thinking":
@@ -162,59 +136,92 @@ class TestInjectCacheControl:
                 assert "cache_control" in block
 
     def test_max_4_breakpoints(self):
+        """Should not exceed 4 total breakpoints."""
         data = {
-            "tools": [{"name": f"t{i}"} for i in range(10)],
-            "system": [{"type": "text", "text": "system prompt"}],
             "messages": [
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "hi"},
-                {"role": "user", "content": "again"},
-                {"role": "assistant", "content": "yo"},
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+                {"role": "assistant", "content": "a2"},
+                {"role": "user", "content": "u3"},
+                {"role": "assistant", "content": "a3"},
+                {"role": "user", "content": "u4"},
+                {"role": "assistant", "content": "a4"},
+                {"role": "user", "content": "u5"},
             ],
         }
         added, action = inject_cache_control(data)
-        # Should not exceed 4 total breakpoints
+        # Count total cache_control markers
         total = 0
-        for tool in data["tools"]:
-            if "cache_control" in tool:
-                total += 1
-        sys = data["system"]
-        if isinstance(sys, list):
-            for s in sys:
-                if isinstance(s, dict) and "cache_control" in s:
-                    total += 1
         for msg in data["messages"]:
             content = msg.get("content")
             if isinstance(content, list):
-                for c in content:
-                    if isinstance(c, dict) and "cache_control" in c:
+                for block in content:
+                    if isinstance(block, dict) and "cache_control" in block:
                         total += 1
-            elif isinstance(content, str):
-                pass  # already counted if wrapped
         assert total <= 4
 
+    def test_no_messages(self):
+        """Should handle empty messages gracefully."""
+        data = {"model": "test"}
+        added, action = inject_cache_control(data)
+        assert added == 0
+        assert "no-op" in action
 
-# ---------------------------------------------------------------------------
-# Strip Unsupported Fields
-# ---------------------------------------------------------------------------
-class TestStripUnsupported:
-    def test_strip_defer_loading(self):
+    def test_existing_at_max(self):
+        """If 4 markers already exist, don't add more."""
         data = {
-            "tools": [
-                {"name": "t1", "defer_loading": True},
-                {"name": "t2"},
-                {"name": "t3", "defer_loading": False},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "u1", "cache_control": {"type": "ephemeral"}}],
+                },
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "a1", "cache_control": {"type": "ephemeral"}}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "u2", "cache_control": {"type": "ephemeral"}}],
+                },
             ],
         }
-        modified = strip_unsupported_fields(data)
-        assert modified
-        for tool in data["tools"]:
-            assert "defer_loading" not in tool
+        added, action = inject_cache_control(data)
+        assert added == 0
 
-    def test_no_tools(self):
-        data = {"messages": []}
-        modified = strip_unsupported_fields(data)
-        assert not modified
+    def test_2nd_assistant_injection(self):
+        """Second-to-last assistant should also get a marker."""
+        data = {
+            "messages": [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+                {"role": "assistant", "content": "a2"},
+                {"role": "user", "content": "u3"},
+            ],
+        }
+        added, action = inject_cache_control(data)
+        # Should inject on both assistant messages
+        assert added >= 2
+        a1 = data["messages"][1]
+        a2 = data["messages"][3]
+        assert isinstance(a1["content"], list) and "cache_control" in a1["content"][-1]
+        assert isinstance(a2["content"], list) and "cache_control" in a2["content"][-1]
+
+    def test_user_only_no_injection(self):
+        """With only user messages, only system (if present) gets marker."""
+        data = {
+            "messages": [
+                {"role": "user", "content": "hello"},
+            ],
+        }
+        added, action = inject_cache_control(data)
+        assert added == 0
 
 
 if __name__ == "__main__":

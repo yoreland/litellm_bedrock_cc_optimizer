@@ -44,7 +44,8 @@ model_list:
 
 litellm_settings:
   # Register our Bedrock Optimizer hook
-  callbacks: bedrock_optimizer.proxy_handler_instance
+  callbacks:
+    - bedrock_optimizer.proxy_handler_instance
 
   # General settings
   drop_params: True            # drop unsupported params gracefully
