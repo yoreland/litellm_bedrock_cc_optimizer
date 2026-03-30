@@ -8,6 +8,7 @@
 |------|------|
 | **Prompt Cache 注入** | 自动为无 `cache_control` 的请求注入最多 4 个断点 |
 | **Cache TTL 升级** | 5min → 1h，大幅减少 cache miss 重写费用 |
+| **Eager Input Streaming** | 工具参数流式传输无缓冲，降低大型参数延迟 |
 | **Thinking/Effort 优化** | Opus/Sonnet 4.6 → adaptive+max；旧模型 → budget_tokens 最大化 |
 | **Model 别名映射** | `claude-opus-4-6` → `bedrock/global.anthropic.claude-opus-4-6-v1` |
 | **自动版本升级** | `claude-sonnet-4-5` 请求自动路由到 Sonnet 4.6 |
@@ -82,6 +83,7 @@ curl http://localhost:4000/chat/completions \
 |------|--------|------|
 | `CACHE_ENABLED` | `1` | 启用 prompt caching 注入 |
 | `CACHE_TTL` | `1h` | Cache TTL（`5m` 或 `1h`） |
+| `EAGER_INPUT_STREAMING` | `1` | 启用工具参数细粒度流式传输 |
 | `AWS_REGION_NAME` | - | AWS 区域 |
 
 ## 优化细节
@@ -94,6 +96,14 @@ curl http://localhost:4000/chat/completions \
   2. System prompt
   3. 最后一条 assistant message 的最后一个非 thinking block
 - 遵守 API 限制：最多 4 个断点
+
+### Eager Input Streaming
+
+- **细粒度工具流式传输**：为所有工具定义自动添加 `eager_input_streaming: true`
+- **降低延迟**：工具参数无需等待完整 JSON 验证即开始流式传输
+- **适用场景**：大型参数（如代码块、长文本、文件内容）
+- **智能保留**：尊重用户显式设置，不覆盖已有的 `eager_input_streaming` 配置
+- **参考**：[Claude Fine-grained Tool Streaming](https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming)
 
 ### Thinking/Effort
 

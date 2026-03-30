@@ -10,6 +10,7 @@ import pytest
 
 from bedrock_optimizer import (
     inject_cache_control,
+    inject_eager_input_streaming,
     _new_cache_marker,
     CACHE_TTL,
 )
@@ -222,6 +223,104 @@ class TestInjectCacheControl:
         }
         added, action = inject_cache_control(data)
         assert added == 0
+
+
+class TestEagerInputStreaming:
+    """Test eager_input_streaming injection into tool definitions."""
+
+    def test_inject_single_tool(self):
+        """Single tool should get eager_input_streaming: true."""
+        data = {
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [
+                {
+                    "name": "write_file",
+                    "description": "Write content to a file",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string"}
+                        }
+                    }
+                }
+            ]
+        }
+        
+        added, action = inject_eager_input_streaming(data)
+        
+        assert added == 1
+        assert data["tools"][0]["eager_input_streaming"] is True
+        assert "eager(1/1tools)" in action
+
+    def test_inject_multiple_tools(self):
+        """All tools should get eager_input_streaming."""
+        data = {
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [
+                {"name": "tool1", "input_schema": {}},
+                {"name": "tool2", "input_schema": {}},
+                {"name": "tool3", "input_schema": {}},
+            ]
+        }
+        
+        added, action = inject_eager_input_streaming(data)
+        
+        assert added == 3
+        for tool in data["tools"]:
+            assert tool["eager_input_streaming"] is True
+        assert "eager(3/3tools)" in action
+
+    def test_preserve_existing_false(self):
+        """Don't override user's explicit eager_input_streaming: false."""
+        data = {
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [
+                {"name": "tool1", "eager_input_streaming": False},
+                {"name": "tool2"},
+            ]
+        }
+        
+        added, action = inject_eager_input_streaming(data)
+        
+        assert added == 1  # Only tool2
+        assert data["tools"][0]["eager_input_streaming"] is False  # Preserved
+        assert data["tools"][1]["eager_input_streaming"] is True
+
+    def test_preserve_existing_true(self):
+        """Don't duplicate if already set to true."""
+        data = {
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [
+                {"name": "tool1", "eager_input_streaming": True},
+            ]
+        }
+        
+        added, action = inject_eager_input_streaming(data)
+        
+        assert added == 0
+        assert data["tools"][0]["eager_input_streaming"] is True
+        assert "already set" in action
+
+    def test_no_tools(self):
+        """Gracefully handle requests without tools."""
+        data = {"messages": [{"role": "user", "content": "test"}]}
+        
+        added, action = inject_eager_input_streaming(data)
+        
+        assert added == 0
+        assert "no tools" in action
+
+    def test_empty_tools_array(self):
+        """Handle empty tools array."""
+        data = {
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": []
+        }
+        
+        added, action = inject_eager_input_streaming(data)
+        
+        assert added == 0
+        assert "no tools" in action
 
 
 if __name__ == "__main__":
