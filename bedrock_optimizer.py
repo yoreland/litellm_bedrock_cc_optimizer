@@ -12,7 +12,8 @@ transformation automatically converts them to Bedrock's cachePoint format.
 Optimizations:
 1. Prompt Cache TTL upgrade (5m → 1h)
 2. Prompt Cache breakpoint auto-injection (up to 4)
-3. Strip unsupported fields
+3. Eager Input Streaming for tools (fine-grained streaming)
+4. Strip unsupported fields
 
 Reference: https://github.com/KevinZhao/claudecode-bedrock-proxy
 """
@@ -37,12 +38,14 @@ if not logger.handlers:
 # ---------------------------------------------------------------------------
 CACHE_ENABLED = os.environ.get("CACHE_ENABLED", "1") == "1"
 CACHE_TTL = os.environ.get("CACHE_TTL", "1h")
+EAGER_INPUT_STREAMING = os.environ.get("EAGER_INPUT_STREAMING", "1") == "1"
 MAX_CACHE_BREAKPOINTS = 4
 
 # Stats
 _stats = {
     "requests": 0,
     "cache_injected": 0,
+    "eager_streaming_injected": 0,
 }
 
 
@@ -108,6 +111,35 @@ def _upgrade_existing_ttl(messages: List[Dict[str, Any]]) -> int:
                         cc["ttl"] = CACHE_TTL
                         upgraded += 1
     return upgraded
+
+
+def inject_eager_input_streaming(data: Dict[str, Any]) -> Tuple[int, str]:
+    """Inject eager_input_streaming: true into tool definitions.
+    
+    Fine-grained tool streaming enables streaming of tool use parameter
+    values without buffering or JSON validation, reducing latency for
+    large parameters like code blocks or long text.
+    
+    Returns:
+        (tools_modified, action_description)
+    """
+    tools = data.get("tools")
+    if not isinstance(tools, list) or len(tools) == 0:
+        return 0, "no-op(no tools)"
+    
+    added = 0
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        
+        # Only inject if not already set (respect explicit user config)
+        if "eager_input_streaming" not in tool:
+            tool["eager_input_streaming"] = True
+            added += 1
+    
+    if added > 0:
+        return added, f"eager({added}/{len(tools)}tools)"
+    return 0, "no-op(already set)"
 
 
 def inject_cache_control(data: Dict[str, Any]) -> Tuple[int, str]:
@@ -200,7 +232,8 @@ class BedrockOptimizer(CustomLogger):
     def __init__(self):
         super().__init__()
         logger.info(
-            f"BedrockOptimizer initialized | cache={CACHE_ENABLED} ttl={CACHE_TTL}"
+            f"BedrockOptimizer initialized | cache={CACHE_ENABLED} ttl={CACHE_TTL} "
+            f"eager_streaming={EAGER_INPUT_STREAMING}"
         )
 
     async def async_pre_call_hook(
@@ -247,7 +280,16 @@ class BedrockOptimizer(CustomLogger):
             if cache_added > 0:
                 _stats["cache_injected"] += 1
 
-        logger.info(f"[#{req_id}] model={model} | cache: {cache_action}")
+        # --- Eager Input Streaming ---
+        streaming_action = "off"
+        if EAGER_INPUT_STREAMING:
+            streaming_added, streaming_action = inject_eager_input_streaming(data)
+            if streaming_added > 0:
+                _stats["eager_streaming_injected"] += 1
+
+        logger.info(
+            f"[#{req_id}] model={model} | cache: {cache_action} | streaming: {streaming_action}"
+        )
 
         return data
 
